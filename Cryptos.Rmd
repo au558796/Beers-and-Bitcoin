@@ -1,0 +1,197 @@
+---
+title: "Cryptos"
+author: "Dana Jensen"
+date: "April 30, 2018"
+output: html_document
+---
+
+PRELUDE
+
+```{r}
+
+setwd("C:/Users/danaj/OneDrive/Desktop/CULTURAL & SOCIAL DYNAMICS/BeersAndBitcoin-master/BeersAndBitcoin-master")
+## devtools::install_github("thomasp85/patchwork", force = TRUE)
+library("pacman")
+p_load(stringi, plyr, dplyr, readr, groupdata2, ggplot2, tidyverse, data.table, lmerTest, grid, brms, rethinking, gridGraphics, reshape2, patchwork)
+
+## raw data
+cryptos <- read.csv("crypto-markets.csv")
+S_P <- read.csv("S_and_P_500.csv")
+
+```
+
+CLEANING
+
+```{r}
+
+## make vector names consistent for both dfs
+S_P <- setnames(S_P, old = "Close", new = "close")
+S_P <- setnames(S_P, old = "Open", new = "open")
+S_P <- setnames(S_P, old = "Date", new = "date")
+S_P <- setnames(S_P, old = "High", new = "high")
+S_P <- setnames(S_P, old = "Low", new = "low")
+S_P$name <- "S&P500"
+
+## drop unwanted columns in order to rbind (merge by.x / by.y not working)
+cryptos <- select(cryptos, date, name, open, close, high, low)
+S_P <- select(S_P, date, name, open, close, high, low)
+
+## S&P500 df doesn't include data for some dates, so let's make a dataset that includes NAs for values for days missing
+min <- as.Date(S_P$date[1])
+max <- as.Date(tail(S_P$date)[1])
+date <- seq.Date(from = min, to = max, by = 1)
+date <- as.data.frame(date)
+date$date <- as.Date(as.factor(date$date))
+temp <- select(S_P, date, name, open, close, high, low)
+temp$date <- as.Date(temp$date)
+temp2 <- merge(date, temp, all = TRUE)
+SP <- temp2
+
+## we are missing data for the weekends for S&P500. To compensate, take the average of friday's return and monday's return
+impute_weekend <- function(column){
+  for (i in 1:length(column)){
+    if (is.na(column[i])){
+      for (ii in i:length(column)){
+        if (is.na(column[ii]) == F){
+          column[i] <- (column[i-1]+column[ii])/2
+          break}}}}
+  return(column)
+}
+
+## imputing price data
+SP$open_i <- impute_weekend(SP$open)
+SP$close_i <- impute_weekend(SP$close)
+SP$high_i <- impute_weekend(SP$high)
+SP$low_i <- impute_weekend(SP$low)
+SP$name <- "S&P500"
+
+```
+
+CALCULATE RETURNS
+
+```{r}
+
+## returns
+cryptos$returns = as.numeric(((cryptos$close - cryptos$open) / cryptos$open) * 100)
+SP$returns <- as.numeric(((SP$close_i - SP$open_i) / SP$open_i) * 100)
+
+## scaling and centering returns
+cryptos$returns <- scale(cryptos$returns, center = TRUE)
+SP$returns <- scale(SP$returns, center = TRUE)
+
+## make a df with S&P500 and BTC for market CSD later
+temp <- select(SP, date, name, open = open_i, close = close_i, high = high_i, low = low_i, returns)
+temp1 <- subset(cryptos, name == "Bitcoin")
+temp$date <- as.Date(temp$date)
+temp1$date <- as.Date(temp1$date)
+btc_sp <- rbind(temp, temp1)
+
+## don't have data for bitcoin before 2013-04-28 and after 2018-01-03
+btc_sp$date <- as.Date(btc_sp$date)
+btc_sp <- subset(btc_sp, date > "2013-04-27")
+btc_sp <- subset(btc_sp, date < "2018-01-03")
+
+```
+
+ABSOLUTE CROSS-SECTIONAL DISPERSION
+
+```{r}
+
+# CRYPTO MARKET
+for (i in as.character(unique(cryptos$date))){
+  ## to test/make sure it works/looks cool
+  print(i)
+  ## making date into character so it matches with i
+  temp <- cryptos
+  temp$date <- as.character(temp$date)
+  temp <- subset(temp, date == i)
+  ## calculate CSD
+  n <- length(unique(temp$name))
+  CSAD_t <- sum(abs(temp$returns - mean(temp$returns, na.rm = TRUE))) / (n - 1) 
+  ## save in new df, cause I don't have enough dataframes
+  temp_df <- data.frame(CSAD = CSAD_t, date = i)
+  if (i == unique(cryptos$date)[1]){
+    crypto_CSAD <- temp_df
+  }else{
+    crypto_CSAD <- rbind(crypto_CSAD, temp_df)
+  }}
+
+# GENERAL MARKET
+for (i in as.character(unique(btc_sp$date))){
+  print(i)
+  i = as.character(i)
+  ## making date into character so it matches with i
+  temp <- btc_sp
+  temp <- subset(temp, date == i)
+  ## n = 2 (btc + sp), 2 - 1 = 1... therefore no need to write " /1 "
+  CSAD_t <- sum(abs((temp$returns[temp$name == "Bitcoin"]) - (temp$returns[temp$name == "S&P500"])))
+  temp_df <- data.frame(CSAD = CSAD_t, date = i)
+  if (i == unique(btc_sp$date)[1]){
+    bitcoin_CSAD <- temp_df
+  }else{
+    bitcoin_CSAD <- rbind(bitcoin_CSAD, temp_df)
+  }}
+
+```
+
+MORE CLEANING
+
+```{r}
+
+## consistency is key
+bitcoin_CSAD <- setnames(bitcoin_CSAD, old = "CSAD", new = "btc_CSAD")
+bitcoin_CSAD$date <- as.Date(bitcoin_CSAD$date)
+crypto_CSAD <- setnames(crypto_CSAD, old = "CSAD", new = "crypto_CSAD")
+crypto_CSAD$date <- as.Date(crypto_CSAD$date)
+
+
+## save it so I don't have to run the loops again
+write.csv(crypto_CSAD, file = "new_crypto_CSAD.csv", row.names = FALSE)
+write.csv(bitcoin_CSAD, file = "new_bitcoin_CSAD.csv", row.names = FALSE)
+
+```
+
+MAKE FANCY PLOTS
+
+```{r}
+
+## each coin vs. crypto market 
+crypto <- ggplot(crypto_CSAD, aes(x = date, y = crypto_CSAD)) +
+  geom_point() +
+  labs(title = "Cross-Sectional Dispersion of Cryptocurrencies", x = "Date")
+
+## bitcoin vs. general market
+bitcoin <- ggplot(bitcoin_CSAD, aes(x = date, y = btc_CSAD)) +
+  geom_point() + 
+  labs(title = "Cross-Sectional Dispersion of Bitcoin", x = "Date")
+  
+## from the package 'patchwork'
+crypto / bitcoin
+
+```
+
+MAKING DATA CLEAN FOR KENNETH <3
+
+```{r}
+
+## clean crypto dataset 
+temp1 <- select(cryptos, date, name, open, close, high, low)
+temp1$date <- as.Date(temp1$date)
+temp1 <- subset(temp1, name == "Bitcoin")
+
+merge1 <- merge(crypto_CSAD, temp1, by = "date")
+
+## clean SP dataset 
+temp2.1 <- subset(btc_sp, name == "S&P500")
+temp2.3 <- select(temp2.1, date, name, open, close, high, low)
+temp2.3$date <- as.Date(temp2.3$date)
+
+merge2 <- merge(bitcoin_CSAD, temp2.3, by = "date")
+merge2 <- setnames(merge2, old = "btc_CSAD", new = "btc_vs._mrkt_CSAD")
+
+## merge
+kenneth <- merge(select(merge1, date, crypto_CSAD, btc_open = open, btc_close = close, btc_high = high, btc_low = low), select(merge2, date, btc_vs_mrkt_CSAD = btc_vs._mrkt_CSAD, SP500_open = open, SP500_close = close, SP500_high = high, SP500_low = low), by = "date")
+write.csv(kenneth, file = "thursday24.csv", row.names = FALSE)
+
+```
+
